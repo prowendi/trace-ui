@@ -33,9 +33,10 @@ task_plan.md
 findings.md
 progress.md
 
-# Docs（仅允许 docs/images/）
+# Docs（仅允许 docs/images/ 和 mcp-guide.md）
 docs/*
 !docs/images/
+!docs/mcp-guide.md
 
 # Trace files
 *.trace

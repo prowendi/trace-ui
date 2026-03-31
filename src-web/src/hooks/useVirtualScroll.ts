@@ -14,6 +14,15 @@ export interface UseVirtualScrollOptions {
   wheelSpeed?: number;
 }
 
+export interface ScrollbarProps {
+  currentRow: number;
+  maxRow: number;
+  visibleRows: number;
+  virtualTotalRows: number;
+  trackHeight: number;
+  onScroll: (row: number) => void;
+}
+
 export interface UseVirtualScrollReturn {
   /** 当前滚动行（钳位后） */
   currentRow: number;
@@ -37,6 +46,8 @@ export interface UseVirtualScrollReturn {
   containerStyle: React.CSSProperties;
   /** 计算指定索引行的 Y 坐标（相对于可视区域顶部） */
   getItemY: (index: number) => number;
+  /** 直接传给 CustomScrollbar 的 props */
+  scrollbarProps: ScrollbarProps;
 }
 
 export function useVirtualScroll({
@@ -46,6 +57,7 @@ export function useVirtualScroll({
   wheelSpeed = DEFAULT_WHEEL_SPEED,
 }: UseVirtualScrollOptions): UseVirtualScrollReturn {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
   const [currentRow, setCurrentRow] = useState(0);
   const [containerHeight, setContainerHeight] = useState(0);
   const [containerWidth, setContainerWidth] = useState(0);
@@ -100,10 +112,15 @@ export function useVirtualScroll({
     };
   }, [maxRow, rowHeight, wheelSpeed]);
 
-  // ResizeObserver
+  // 通过 MutationObserver-like 轮询检测 containerRef 挂载，触发 ResizeObserver 重建
   useEffect(() => {
     const el = containerRef.current;
-    if (!el) return;
+    if (el !== containerEl) setContainerEl(el);
+  });
+
+  // ResizeObserver — 依赖 containerEl 而非空数组，确保条件渲染延迟挂载时也能正确建立
+  useEffect(() => {
+    if (!containerEl) return;
     let timer = 0;
     const ro = new ResizeObserver((entries) => {
       clearTimeout(timer);
@@ -113,9 +130,9 @@ export function useVirtualScroll({
         setContainerWidth(w);
       }, document.documentElement.dataset.separatorDrag ? 300 : 0);
     });
-    ro.observe(el);
+    ro.observe(containerEl);
     return () => { clearTimeout(timer); ro.disconnect(); };
-  }, []);
+  }, [containerEl]);
 
   // 可见范围
   const startIdx = Math.max(0, clampedRow - overscan);
@@ -131,6 +148,15 @@ export function useVirtualScroll({
     position: "relative",
   };
 
+  const scrollbarProps: ScrollbarProps = {
+    currentRow: clampedRow,
+    maxRow,
+    visibleRows,
+    virtualTotalRows: totalCount,
+    trackHeight: containerHeight,
+    onScroll: scrollToRow,
+  };
+
   return {
     currentRow: clampedRow,
     visibleRows,
@@ -143,5 +169,6 @@ export function useVirtualScroll({
     containerWidth,
     containerStyle,
     getItemY,
+    scrollbarProps,
   };
 }

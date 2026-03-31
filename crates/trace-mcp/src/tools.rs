@@ -313,7 +313,14 @@ impl TraceToolHandler {
         let sid = self.resolve_session(req.session_id)?;
         let addr = parse_hex_addr(&req.address)?;
         let length = req.length.min(256);
-        self.engine.get_memory_at(&sid, addr, req.seq, length)
+        let seq = match req.seq {
+            Some(s) => s,
+            None => {
+                let info = self.engine.get_session_info(&sid).map_err(|e| e.to_string())?;
+                info.total_lines.saturating_sub(1)
+            }
+        };
+        self.engine.get_memory_at(&sid, addr, seq, length)
             .map(|snap| json(&snap))
             .map_err(|e| e.to_string())
     }
@@ -419,36 +426,6 @@ impl TraceToolHandler {
                 "total_matches": effective_total,
                 "total_scanned": result.total_scanned,
                 "truncated": result.truncated || final_lines.len() < total_after_seq_filter,
-            })))
-        }).await
-    }
-
-    #[tool(
-        name = "run_taint_analysis",
-        description = "Perform backward taint analysis (data dependency tracking) \
-            from a register or memory address at a specific instruction. \
-            Returns which instructions contributed to the tainted value. \
-            Use this to trace where a value came from. \
-            Register names are case-insensitive. \
-            Example from_specs: ['reg:X0@1234'] traces X0 at line 1234, \
-            ['mem:0xbffff000@last'] traces the last write to that address."
-    )]
-    async fn run_taint_analysis(&self, Parameters(req): Parameters<RunTaintAnalysisRequest>) -> Result<String, String> {
-        let sid = self.resolve_session(req.session_id)?;
-        let engine = self.engine.clone();
-        blocking(move || {
-            let options = SliceOptions {
-                start_seq: req.start_seq,
-                end_seq: req.end_seq,
-                data_only: req.data_only,
-            };
-            let result = engine.run_slice(&sid, &req.from_specs, options)
-                .map_err(|e| e.to_string())?;
-            Ok(json(&serde_json::json!({
-                "marked_count": result.marked_count,
-                "total_lines": result.total_lines,
-                "percentage": format!("{:.2}%", result.percentage),
-                "hint": "Use get_tainted_lines to retrieve the actual tainted instructions.",
             })))
         }).await
     }
@@ -587,18 +564,6 @@ impl TraceToolHandler {
     }
 
     #[tool(
-        name = "clear_taint",
-        description = "Clear the current taint analysis results. \
-            Call this before running a new taint analysis if you want fresh results."
-    )]
-    fn clear_taint(&self, Parameters(req): Parameters<ClearTaintRequest>) -> Result<String, String> {
-        let sid = self.resolve_session(req.session_id)?;
-        self.engine.clear_slice(&sid)
-            .map(|()| "Taint results cleared.".to_string())
-            .map_err(|e| e.to_string())
-    }
-
-    #[tool(
         name = "get_dependency_tree",
         description = "Build a dependency graph showing how a value at a specific instruction \
             was computed. Returns a DAG of instructions connected by data/control dependencies. \
@@ -615,7 +580,14 @@ impl TraceToolHandler {
                 max_nodes: Some(max_nodes),
             };
             engine.build_dep_tree(&sid, req.seq, &req.target, options)
-                .map(|graph| json(&graph))
+                .map(|graph| {
+                    let mut val = serde_json::to_value(&graph)
+                        .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}));
+                    val.as_object_mut().map(|o| {
+                        o.insert("hint".to_string(), serde_json::json!("Nodes with is_leaf=true are the ultimate data sources."));
+                    });
+                    json(&val)
+                })
                 .map_err(|e| e.to_string())
         }).await
     }
@@ -630,53 +602,114 @@ impl TraceToolHandler {
     )]
     fn get_def_use_chain(&self, Parameters(req): Parameters<GetDefUseChainRequest>) -> Result<String, String> {
         let sid = self.resolve_session(req.session_id)?;
-        self.engine.get_def_use_chain(&sid, req.seq, &req.register.to_lowercase())
-            .map(|chain| json(&chain))
-            .map_err(|e| e.to_string())
+        match self.engine.get_def_use_chain(&sid, req.seq, &req.register.to_lowercase()) {
+            Ok(chain) => Ok(json(&chain)),
+            Err(e) => {
+                let available = self.engine.get_line_def_registers(&sid, req.seq)
+                    .map(|regs| format!(". Available defined registers at line {}: {}", req.seq, regs.join(", ")))
+                    .unwrap_or_default();
+                Err(format!("{}{}", e, available))
+            }
+        }
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━ 结构信息 ━━━━━━━━━━━━━━━━━━━━━━
 
-    #[tool(
-        name = "get_call_tree",
-        description = "Get the function call tree rooted at a specific node. \
-            Returns the node itself plus its direct children (lazy loading). \
-            Use node_id=0 to start from the root. Each node contains: \
-            function address, name, entry/exit line numbers, and child node IDs."
-    )]
-    fn get_call_tree(&self, Parameters(req): Parameters<GetCallTreeRequest>) -> Result<String, String> {
-        let sid = self.resolve_session(req.session_id)?;
-        self.engine.get_call_tree_children(&sid, req.node_id, true)
-            .map(|nodes| json(&nodes))
-            .map_err(|e| e.to_string())
+    fn collect_tree_to_depth(
+        &self,
+        session_id: &str,
+        node_id: u32,
+        depth: u32,
+        max_nodes: u32,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let nodes = self.engine.get_call_tree_children(session_id, node_id, true)
+            .map_err(|e| e.to_string())?;
+        if nodes.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut result: Vec<serde_json::Value> = vec![serde_json::to_value(&nodes[0])
+            .map_err(|e| e.to_string())?];
+        if depth <= 1 {
+            for child in &nodes[1..] {
+                if result.len() as u32 >= max_nodes { break; }
+                result.push(serde_json::to_value(child).map_err(|e| e.to_string())?);
+            }
+        } else {
+            for child in &nodes[1..] {
+                if result.len() as u32 >= max_nodes { break; }
+                let remaining = max_nodes - result.len() as u32;
+                let sub = self.collect_tree_to_depth(session_id, child.id, depth - 1, remaining)?;
+                result.extend(sub);
+            }
+        }
+        Ok(result)
     }
 
     #[tool(
-        name = "get_function_info",
-        description = "Get detailed information about a specific function call in the call tree. \
-            Returns the function's address, name, entry/exit lines, line count, and child calls."
+        name = "get_call_tree",
+        description = "Get the function call tree rooted at a specific node. \
+            Use node_id=0 to start from the root. depth controls expansion levels (1-3). \
+            Returns nodes array, count, total_node_count (full tree size), and depth used. \
+            Each node contains: function address, name, entry/exit line numbers, and child node IDs."
     )]
-    fn get_function_info(&self, Parameters(req): Parameters<GetFunctionInfoRequest>) -> Result<String, String> {
+    fn get_call_tree(&self, Parameters(req): Parameters<GetCallTreeRequest>) -> Result<String, String> {
         let sid = self.resolve_session(req.session_id)?;
-        let nodes = self.engine.get_call_tree_children(&sid, req.node_id, true)
-            .map_err(|e| e.to_string())?;
-        match nodes.first() {
-            Some(node) => Ok(json(node)),
-            None => Err(format!("Node {} not found", req.node_id)),
-        }
+        let depth = req.depth.min(3).max(1);
+        let max_nodes: u32 = 500;
+        let nodes = self.collect_tree_to_depth(&sid, req.node_id, depth, max_nodes)?;
+        let total_count = self.engine.get_call_tree_node_count(&sid).unwrap_or(0);
+        Ok(json(&serde_json::json!({
+            "nodes": nodes,
+            "count": nodes.len(),
+            "total_node_count": total_count,
+            "depth": depth,
+            "hint": "Use analyze_function with node_id for detailed analysis including entry arguments.",
+        })))
     }
 
     #[tool(
         name = "get_function_list",
-        description = "Get an aggregated list of all function calls found in the trace. \
-            Groups calls by function name, showing each occurrence with its line number. \
-            Useful for finding where specific functions are called."
+        description = "Get an aggregated list of function calls found in the trace. \
+            Supports search filtering by name (case-insensitive partial match) and pagination. \
+            Each entry shows func_name, call_count, and is_jni flag."
     )]
     fn get_function_list(&self, Parameters(req): Parameters<GetFunctionListRequest>) -> Result<String, String> {
         let sid = self.resolve_session(req.session_id)?;
-        self.engine.get_function_calls(&sid)
-            .map(|result| json(&result))
-            .map_err(|e| e.to_string())
+        let result = self.engine.get_function_calls(&sid)
+            .map_err(|e| e.to_string())?;
+
+        let limit = req.limit.min(100);
+
+        // Filter by search
+        let filtered: Vec<&trace_core::api_types::FunctionCallEntry> = if let Some(ref search) = req.search {
+            let query_lower = search.to_lowercase();
+            result.functions.iter()
+                .filter(|f| f.func_name.to_lowercase().contains(&query_lower))
+                .collect()
+        } else {
+            result.functions.iter().collect()
+        };
+
+        let total = filtered.len() as u32;
+
+        // Pagination
+        let page: Vec<serde_json::Value> = filtered.iter()
+            .skip(req.offset as usize)
+            .take(limit as usize)
+            .map(|f| serde_json::json!({
+                "func_name": f.func_name,
+                "call_count": f.occurrences.len(),
+                "is_jni": f.is_jni,
+            }))
+            .collect();
+
+        Ok(json(&serde_json::json!({
+            "functions": page,
+            "total": total,
+            "total_calls": result.total_calls,
+            "offset": req.offset,
+            "has_more": (req.offset + page.len() as u32) < total,
+        })))
     }
 
     #[tool(
@@ -697,12 +730,17 @@ impl TraceToolHandler {
         };
         let result = self.engine.get_strings(&sid, options)
             .map_err(|e| e.to_string())?;
-        Ok(json(&serde_json::json!({
+        let has_results = !result.strings.is_empty();
+        let mut response = serde_json::json!({
             "strings": result.strings,
             "total": result.total,
             "offset": req.offset,
             "has_more": (req.offset + result.strings.len() as u32) < result.total,
-        })))
+        });
+        if has_results {
+            response["hint"] = serde_json::json!("Use get_string_xrefs with address and byte_len to find which instructions access a string.");
+        }
+        Ok(json(&response))
     }
 
     #[tool(
@@ -714,28 +752,20 @@ impl TraceToolHandler {
     fn get_string_xrefs(&self, Parameters(req): Parameters<GetStringXRefsRequest>) -> Result<String, String> {
         let sid = self.resolve_session(req.session_id)?;
         let addr = parse_hex_addr(&req.address)?;
-        self.engine.get_string_xrefs(&sid, addr, req.byte_len)
-            .map(|xrefs| json(&xrefs))
-            .map_err(|e| e.to_string())
-    }
-
-    #[tool(
-        name = "scan_crypto_patterns",
-        description = "Scan the trace for known cryptographic algorithm signatures \
-            (AES, SHA256, MD5, etc.) by detecting magic number constants in register values. \
-            Returns matched algorithms and the instructions where they appear."
-    )]
-    async fn scan_crypto_patterns(&self, Parameters(req): Parameters<ScanCryptoPatternsRequest>) -> Result<String, String> {
-        let sid = self.resolve_session(req.session_id)?;
-        let engine = self.engine.clone();
-        blocking(move || {
-            if let Ok(Some(cached)) = engine.load_crypto_cache(&sid) {
-                return Ok(json(&cached));
-            }
-            engine.scan_crypto(&sid)
-                .map(|result| json(&result))
-                .map_err(|e| e.to_string())
-        }).await
+        let limit = req.limit.min(100);
+        let all_xrefs = self.engine.get_string_xrefs(&sid, addr, req.byte_len)
+            .map_err(|e| e.to_string())?;
+        let total = all_xrefs.len() as u32;
+        let page: Vec<_> = all_xrefs.into_iter()
+            .skip(req.offset as usize)
+            .take(limit as usize)
+            .collect();
+        Ok(json(&serde_json::json!({
+            "xrefs": page,
+            "total": total,
+            "offset": req.offset,
+            "has_more": (req.offset + page.len() as u32) < total,
+        })))
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━ 扩展工具 ━━━━━━━━━━━━━━━━━━━━━━
@@ -799,18 +829,6 @@ impl TraceToolHandler {
         let sid = self.resolve_session(req.session_id)?;
         self.engine.get_line_def_registers(&sid, req.seq)
             .map(|regs| json(&regs))
-            .map_err(|e| e.to_string())
-    }
-
-    #[tool(
-        name = "get_call_tree_node_count",
-        description = "Get the total number of nodes in the function call tree. \
-            Useful for understanding the scale of the call tree before exploring it."
-    )]
-    fn get_call_tree_node_count(&self, Parameters(req): Parameters<GetCallTreeNodeCountRequest>) -> Result<String, String> {
-        let sid = self.resolve_session(req.session_id)?;
-        self.engine.get_call_tree_node_count(&sid)
-            .map(|count| json(&serde_json::json!({ "node_count": count })))
             .map_err(|e| e.to_string())
     }
 
@@ -1112,12 +1130,19 @@ impl ServerHandler for TraceToolHandler {
                 .build(),
         )
         .with_instructions(
-            "Trace UI MCP Server — analyze ARM64 execution traces. \
-             Start by calling open_trace with a file path, then use the returned \
-             session_id for all analysis operations. Available analyses: \
-             instruction browsing, register/memory inspection, taint analysis, \
-             dependency trees, function call trees, string extraction, and \
-             cryptographic pattern detection.".to_string(),
+            "Trace UI MCP Server — analyze ARM64 execution traces.\n\n\
+             Workflow:\n\
+             1. Start: open_trace with file path → get session overview\n\
+             2. Overview: get_function_list, analyze_crypto to detect algorithms\n\
+             3. Locate: search_instructions (supports seq_range/addr_range filtering)\n\
+             4. Trace: taint_analysis to track data flow (returns stats + first page of results)\n\
+             5. Deep dive: get_dependency_tree or get_def_use_chain on specific instructions\n\
+             6. Extract: get_memory / get_registers at key points\n\n\
+             Tips:\n\
+             - session_id is optional when only one trace is open\n\
+             - Use data_only=true in taint_analysis to reduce noise\n\
+             - analyze_function with node_id shows entry args (X0-X7) and return value\n\
+             - Use addr_range to focus search/taint on a specific address range".to_string(),
         )
     }
 }

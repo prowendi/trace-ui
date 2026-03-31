@@ -59,8 +59,8 @@ pub struct GetMemoryRequest {
     pub session_id: Option<String>,
     #[schemars(description = "Memory address in hex (e.g. '0xbffff000')")]
     pub address: String,
-    #[schemars(description = "Line number (0-based) at which to read memory state")]
-    pub seq: u32,
+    #[schemars(description = "Line number to read memory at (default: last line of trace)")]
+    pub seq: Option<u32>,
     #[schemars(description = "Number of bytes to read (default: 64, max: 256)")]
     #[serde(default = "default_mem_length")]
     pub length: u32,
@@ -112,24 +112,6 @@ pub struct SearchInstructionsRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct RunTaintAnalysisRequest {
-    #[schemars(description = "Session ID (optional if only one session is open)")]
-    pub session_id: Option<String>,
-    #[schemars(description = "Taint sources (case-insensitive register names): \
-        'reg:X0@1234' (register X0 at line 1234), \
-        'mem:0xbffff000@1234' (memory address at line), \
-        use '@last' for last definition")]
-    pub from_specs: Vec<String>,
-    #[schemars(description = "Only track data dependencies (ignore control flow)")]
-    #[serde(default)]
-    pub data_only: bool,
-    #[schemars(description = "Restrict analysis to lines >= this seq")]
-    pub start_seq: Option<u32>,
-    #[schemars(description = "Restrict analysis to lines <= this seq")]
-    pub end_seq: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetTaintedLinesRequest {
     #[schemars(description = "Session ID (optional if only one session is open)")]
     pub session_id: Option<String>,
@@ -154,12 +136,6 @@ pub struct GetTaintedLinesRequest {
 
 fn default_taint_limit() -> u32 { 50 }
 fn default_true() -> bool { true }
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ClearTaintRequest {
-    #[schemars(description = "Session ID (optional if only one session is open)")]
-    pub session_id: Option<String>,
-}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetDependencyTreeRequest {
@@ -194,21 +170,28 @@ pub struct GetCallTreeRequest {
     pub session_id: Option<String>,
     #[schemars(description = "Node ID to get children for (0 = root). Use this for lazy loading of large call trees")]
     pub node_id: u32,
+    #[schemars(description = "Number of levels to expand (default: 1, max: 3). depth=1 returns node + direct children")]
+    #[serde(default = "default_depth")]
+    pub depth: u32,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct GetFunctionInfoRequest {
-    #[schemars(description = "Session ID (optional if only one session is open)")]
-    pub session_id: Option<String>,
-    #[schemars(description = "Call tree node ID to get detailed info for")]
-    pub node_id: u32,
-}
+fn default_depth() -> u32 { 1 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetFunctionListRequest {
     #[schemars(description = "Session ID (optional if only one session is open)")]
     pub session_id: Option<String>,
+    #[schemars(description = "Filter functions by name (partial match, case-insensitive)")]
+    pub search: Option<String>,
+    #[schemars(description = "Pagination offset (default: 0)")]
+    #[serde(default)]
+    pub offset: u32,
+    #[schemars(description = "Max functions to return (default: 30, max: 100)")]
+    #[serde(default = "default_func_list_limit")]
+    pub limit: u32,
 }
+
+fn default_func_list_limit() -> u32 { 30 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetStringsRequest {
@@ -238,13 +221,15 @@ pub struct GetStringXRefsRequest {
     pub address: String,
     #[schemars(description = "Byte length of the string (from get_strings result's byte_len field)")]
     pub byte_len: u32,
+    #[schemars(description = "Pagination offset (default: 0)")]
+    #[serde(default)]
+    pub offset: u32,
+    #[schemars(description = "Max xrefs to return (default: 30, max: 100)")]
+    #[serde(default = "default_xref_limit")]
+    pub limit: u32,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ScanCryptoPatternsRequest {
-    #[schemars(description = "Session ID (optional if only one session is open)")]
-    pub session_id: Option<String>,
-}
+fn default_xref_limit() -> u32 { 30 }
 
 // ── 新增工具请求类型 ──
 
@@ -278,12 +263,6 @@ pub struct GetLineDefRegistersRequest {
     pub session_id: Option<String>,
     #[schemars(description = "Line number (0-based) to query defined registers at")]
     pub seq: u32,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct GetCallTreeNodeCountRequest {
-    #[schemars(description = "Session ID (optional if only one session is open)")]
-    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

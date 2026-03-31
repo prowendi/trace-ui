@@ -6,6 +6,7 @@ import { useSelectedSeq } from "../stores/selectedSeqStore";
 import type { ResolvedRow } from "../hooks/useFoldState";
 import Minimap, { MINIMAP_WIDTH } from "./Minimap";
 import CustomScrollbar from "./CustomScrollbar";
+import ContextMenu, { ContextMenuItem, ContextMenuSeparator } from "./ContextMenu";
 
 interface MemHistoryRecord {
   seq: number;
@@ -106,6 +107,7 @@ export default function MemoryPanel({ selectedSeq: selectedSeqProp, isPhase2Read
   const historyMinimapSamples = useRef<MemHistoryRecord[]>([]);
   const [historyAddr, setHistoryAddr] = useState<string | null>(null);
   const historyRef = useRef<HTMLDivElement>(null);
+  const [hexContextMenu, setHexContextMenu] = useState<{ x: number; y: number; selText: string } | null>(null);
 
   const getHistoryRecord = useCallback((globalIndex: number): MemHistoryRecord | undefined => {
     const pageIndex = Math.floor(globalIndex / HISTORY_PAGE_SIZE);
@@ -541,6 +543,57 @@ export default function MemoryPanel({ selectedSeq: selectedSeqProp, isPhase2Read
     return "var(--text-hex-zero)";
   }, [highlightStart, highlightEnd, lastNonZeroOffset]);
 
+  // hexdump 右键菜单
+  const handleHexContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const selText = window.getSelection()?.toString() ?? "";
+    setHexContextMenu({ x: e.clientX, y: e.clientY, selText });
+  }, []);
+
+  /** 生成完整 hexdump 文本（地址 + hex + ascii） */
+  const buildHexdumpText = useCallback(() => {
+    return hexLines.map((line) => {
+      const hex1 = line.bytes.slice(0, 8).map(b => b.known ? formatHexByte(b.value) : "??").join(" ");
+      const hex2 = line.bytes.slice(8, 16).map(b => b.known ? formatHexByte(b.value) : "??").join(" ");
+      const ascii = line.bytes.map(b => (b.known && b.value !== 0) ? toAsciiChar(b.value) : ".").join("");
+      return `${line.addr}  ${hex1}  ${hex2}  ${ascii}`;
+    }).join("\n");
+  }, [hexLines]);
+
+  /** 仅 hex 字节（无空格无换行） */
+  const buildHexOnly = useCallback(() => {
+    return hexLines.flatMap((line) =>
+      line.bytes.map(b => b.known ? formatHexByte(b.value) : "??")
+    ).join("");
+  }, [hexLines]);
+
+  /** 仅 ASCII（无换行，连续输出） */
+  const buildAsciiOnly = useCallback(() => {
+    return hexLines.flatMap((line) =>
+      line.bytes.map(b => (b.known && b.value !== 0) ? toAsciiChar(b.value) : ".")
+    ).join("");
+  }, [hexLines]);
+
+  const handleCopyHexdump = useCallback(() => {
+    navigator.clipboard.writeText(buildHexdumpText());
+    setHexContextMenu(null);
+  }, [buildHexdumpText]);
+
+  const handleCopyHex = useCallback(() => {
+    navigator.clipboard.writeText(buildHexOnly());
+    setHexContextMenu(null);
+  }, [buildHexOnly]);
+
+  const handleCopyAscii = useCallback(() => {
+    navigator.clipboard.writeText(buildAsciiOnly());
+    setHexContextMenu(null);
+  }, [buildAsciiOnly]);
+
+  const handleCopySelection = useCallback(() => {
+    if (hexContextMenu?.selText) navigator.clipboard.writeText(hexContextMenu.selText);
+    setHexContextMenu(null);
+  }, [hexContextMenu]);
+
   if (!isPhase2Ready) {
     return (
       <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -702,7 +755,7 @@ export default function MemoryPanel({ selectedSeq: selectedSeqProp, isPhase2Read
               <span>{"ASCII"}</span>
             </div>
             <div ref={hexWrapperRef} style={{ flex: 1, overflow: "hidden" }}>
-            <div style={{
+            <div onContextMenu={handleHexContextMenu} style={{
               height: hexClippedHeight, overflowY: "auto", overflowX: "hidden", padding: "0 8px",
               scrollbarWidth: "thin",
               scrollbarColor: "var(--text-secondary) transparent",
@@ -755,6 +808,17 @@ export default function MemoryPanel({ selectedSeq: selectedSeqProp, isPhase2Read
             </div>
           </>)}
         </div>
+
+        {/* Hexdump 右键菜单 */}
+        {hexContextMenu && (
+          <ContextMenu x={hexContextMenu.x} y={hexContextMenu.y} onClose={() => setHexContextMenu(null)}>
+            <ContextMenuItem label="Copy Hexdump" onClick={handleCopyHexdump} disabled={hexLines.length === 0} />
+            <ContextMenuItem label="Copy Hex" onClick={handleCopyHex} disabled={hexLines.length === 0} />
+            <ContextMenuItem label="Copy ASCII" onClick={handleCopyAscii} disabled={hexLines.length === 0} />
+            <ContextMenuSeparator />
+            <ContextMenuItem label="Copy Selected Text" onClick={handleCopySelection} disabled={!hexContextMenu.selText} />
+          </ContextMenu>
+        )}
 
         {/* Access History（右侧，可拖拽宽度） */}
         {showHistory && (

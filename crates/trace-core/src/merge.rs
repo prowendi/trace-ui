@@ -483,7 +483,8 @@ pub fn merge_all_chunks(
     data_only: bool,
     skip_strings: bool,
     progress_fn: Option<&dyn Fn(f64)>,
-) -> ScanResult {
+    cancel_flag: Option<&std::sync::atomic::AtomicBool>,
+) -> std::result::Result<ScanResult, crate::error::TraceError> {
     let num_chunks = chunk_results.len();
     let mut all_patch_edges: Vec<(u32, u32)> = Vec::new();
     let mut all_pair_fixups: Vec<(u32, PairSplitDeps)> = Vec::new();
@@ -818,6 +819,12 @@ pub fn merge_all_chunks(
                 sb.process_access(addr, data, size, seq, rw);
                 processed += 1;
                 if processed % report_interval == 0 {
+                    // Check cancellation
+                    if let Some(flag) = cancel_flag {
+                        if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            return Err(crate::error::TraceError::Cancelled);
+                        }
+                    }
                     if let Some(ref cb) = progress_fn {
                         cb(0.85 + 0.12 * (processed as f64 / total_accesses as f64));
                     }
@@ -879,14 +886,14 @@ pub fn merge_all_chunks(
 
     if let Some(ref cb) = progress_fn { cb(1.0); }
 
-    ScanResult {
+    Ok(ScanResult {
         scan_state,
         phase2,
         line_index,
         format,
         call_annotations,
         consumed_seqs: all_consumed_seqs,
-    }
+    })
 }
 
 #[cfg(test)]

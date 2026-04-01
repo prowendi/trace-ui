@@ -39,6 +39,7 @@ const PAGE_MASK: u64 = !(PAGE_SIZE as u64 - 1);
 struct Page {
     data: [u8; PAGE_SIZE],
     valid: [u64; PAGE_SIZE / 64], // bitset: 512 bytes vs 4096 bytes
+    owner: [u32; PAGE_SIZE],      // string ID per byte, 0 = no owner
 }
 
 impl Page {
@@ -46,6 +47,7 @@ impl Page {
         Page {
             data: [0; PAGE_SIZE],
             valid: [0u64; PAGE_SIZE / 64],
+            owner: [0u32; PAGE_SIZE],
         }
     }
 
@@ -61,6 +63,21 @@ impl Page {
         let word = offset / 64;
         let bit = offset % 64;
         self.valid[word] |= 1u64 << bit;
+    }
+
+    #[inline]
+    fn get_owner(&self, offset: usize) -> u32 {
+        self.owner[offset]
+    }
+
+    #[inline]
+    fn set_owner(&mut self, offset: usize, id: u32) {
+        self.owner[offset] = id;
+    }
+
+    #[inline]
+    fn clear_owner(&mut self, offset: usize) {
+        self.owner[offset] = 0;
     }
 }
 
@@ -88,6 +105,30 @@ impl PagedMemory {
             if page.is_valid(offset) { Some(page.data[offset]) } else { None }
         })
     }
+
+    pub fn get_owner(&self, addr: u64) -> u32 {
+        let page_addr = addr & PAGE_MASK;
+        let offset = (addr & !PAGE_MASK) as usize;
+        self.pages.get(&page_addr)
+            .map(|page| page.get_owner(offset))
+            .unwrap_or(0)
+    }
+
+    pub fn set_owner(&mut self, addr: u64, id: u32) {
+        let page_addr = addr & PAGE_MASK;
+        let offset = (addr & !PAGE_MASK) as usize;
+        if let Some(page) = self.pages.get_mut(&page_addr) {
+            page.set_owner(offset, id);
+        }
+    }
+
+    pub fn clear_owner(&mut self, addr: u64) {
+        let page_addr = addr & PAGE_MASK;
+        let offset = (addr & !PAGE_MASK) as usize;
+        if let Some(page) = self.pages.get_mut(&page_addr) {
+            page.clear_owner(offset);
+        }
+    }
 }
 
 // ── 活跃字符串 ──
@@ -108,7 +149,6 @@ const MIN_CACHE_LEN: u32 = 2;
 
 pub struct StringBuilder {
     byte_image: PagedMemory,
-    byte_owner: FxHashMap<u64, u32>,
     active: FxHashMap<u32, ActiveString>,
     results: Vec<StringRecord>,
     next_id: u32,
@@ -118,10 +158,9 @@ impl StringBuilder {
     pub fn new() -> Self {
         Self {
             byte_image: PagedMemory::new(),
-            byte_owner: FxHashMap::default(),
             active: FxHashMap::default(),
             results: Vec::new(),
-            next_id: 0,
+            next_id: 1, // start from 1, 0 = no owner
         }
     }
 
@@ -153,10 +192,9 @@ impl StringBuilder {
         // 2. 收集受影响的活跃字符串 id
         let mut affected_ids: Vec<u32> = Vec::new();
         for i in 0..size as u64 {
-            if let Some(&id) = self.byte_owner.get(&(addr + i)) {
-                if !affected_ids.contains(&id) {
-                    affected_ids.push(id);
-                }
+            let id = self.byte_image.get_owner(addr + i);
+            if id != 0 && !affected_ids.contains(&id) {
+                affected_ids.push(id);
             }
         }
 
@@ -175,7 +213,7 @@ impl StringBuilder {
                     });
                 }
                 for j in 0..old.byte_len as u64 {
-                    self.byte_owner.remove(&(old.addr + j));
+                    self.byte_image.clear_owner(old.addr + j);
                 }
             }
         }
@@ -239,7 +277,8 @@ impl StringBuilder {
             }
 
             // 如果该区域已被某个活跃字符串覆盖且内容相同，跳过
-            if let Some(&existing_id) = self.byte_owner.get(&str_start) {
+            let existing_id = self.byte_image.get_owner(str_start);
+            if existing_id != 0 {
                 if let Some(existing) = self.active.get(&existing_id) {
                     if existing.addr == str_start && existing.byte_len == bytes.len() as u32 {
                         continue;
@@ -273,20 +312,29 @@ impl StringBuilder {
             self.next_id += 1;
             for j in 0..byte_len as u64 {
                 let a = str_start + j;
-                if let Some(old_id) = self.byte_owner.insert(a, id) {
-                    if old_id != id {
-                        if let Some(old) = self.active.remove(&old_id) {
-                            if old.byte_len >= MIN_CACHE_LEN {
-                                self.results.push(StringRecord {
-                                    addr: old.addr,
-                                    content: old.content,
-                                    encoding: old.encoding,
-                                    byte_len: old.byte_len,
-                                    seq: old.seq,
-                                    xref_count: 0,
-                                    rw: old.rw,
-                                });
+                let old_id = self.byte_image.get_owner(a);
+                self.byte_image.set_owner(a, id);
+                if old_id != 0 && old_id != id {
+                    if let Some(old) = self.active.remove(&old_id) {
+                        // 清理被驱逐字符串在新字符串覆盖范围外的残留 owner 条目
+                        for k in 0..old.byte_len as u64 {
+                            let old_a = old.addr + k;
+                            if old_a < str_start || old_a >= str_start + byte_len as u64 {
+                                // 仅清理新字符串覆盖范围外的条目；
+                                // 范围内的条目已被/将被当前循环覆写。
+                                self.byte_image.clear_owner(old_a);
                             }
+                        }
+                        if old.byte_len >= MIN_CACHE_LEN {
+                            self.results.push(StringRecord {
+                                addr: old.addr,
+                                content: old.content,
+                                encoding: old.encoding,
+                                byte_len: old.byte_len,
+                                seq: old.seq,
+                                xref_count: 0,
+                                rw: old.rw,
+                            });
                         }
                     }
                 }

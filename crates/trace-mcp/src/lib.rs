@@ -30,9 +30,10 @@ pub async fn start_sse(
     let service = StreamableHttpService::new(
         move || Ok(TraceToolHandler::new(engine_clone.clone())),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig {
-            cancellation_token: cancel_token.child_token(),
-            ..Default::default()
+        {
+            let mut config = StreamableHttpServerConfig::default();
+            config.cancellation_token = cancel_token.child_token();
+            config
         },
     );
 

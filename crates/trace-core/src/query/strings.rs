@@ -279,17 +279,33 @@ impl StringBuilder {
     fn extract_strings_in_range(&mut self, start: u64, end: u64, seq: u32, rw: StringRw) {
         let mut pos = start;
         while pos <= end {
-            match self.byte_image.get_byte(pos) {
-                Some(b) if is_printable_or_utf8(b) => {}
-                _ => { pos += 1; continue; }
+            // Check current byte using page-level access
+            let pg_addr = pos & PAGE_MASK;
+            let off = (pos & !PAGE_MASK) as usize;
+            let is_printable = self.byte_image.get_page(pg_addr)
+                .map(|p| p.is_valid(off) && is_printable_or_utf8(p.data[off]))
+                .unwrap_or(false);
+            if !is_printable {
+                pos += 1;
+                continue;
             }
 
             let str_start = pos;
             let mut bytes: Vec<u8> = Vec::new();
+
+            // Collect consecutive printable bytes with page-level access
+            let mut cur_pg_addr = pg_addr;
+            let mut cur_pg = self.byte_image.get_page(cur_pg_addr);
             while pos <= end {
-                match self.byte_image.get_byte(pos) {
-                    Some(b) if is_printable_or_utf8(b) => {
-                        bytes.push(b);
+                let new_pg_addr = pos & PAGE_MASK;
+                if new_pg_addr != cur_pg_addr {
+                    cur_pg_addr = new_pg_addr;
+                    cur_pg = self.byte_image.get_page(cur_pg_addr);
+                }
+                let o = (pos & !PAGE_MASK) as usize;
+                match cur_pg {
+                    Some(p) if p.is_valid(o) && is_printable_or_utf8(p.data[o]) => {
+                        bytes.push(p.data[o]);
                         pos += 1;
                     }
                     _ => break,

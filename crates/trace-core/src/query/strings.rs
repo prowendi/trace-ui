@@ -482,22 +482,44 @@ impl StringBuilder {
     }
 
     pub fn fill_xref_counts_view(index: &mut StringIndex, mem_view: &crate::flat::mem_access::MemAccessView<'_>) {
+        use rayon::prelude::*;
         use rustc_hash::FxHashMap;
 
-        let mut read_counts: FxHashMap<u64, u32> = FxHashMap::default();
-        for (addr, rec) in mem_view.iter_all() {
-            if rec.is_read() {
-                *read_counts.entry(addr).or_insert(0) += 1;
-            }
-        }
+        let addr_count = mem_view.addr_count();
+        if addr_count == 0 || index.strings.is_empty() { return; }
 
-        for record in &mut index.strings {
+        // Parallel build of read_counts: partition by address index ranges
+        let num_threads = rayon::current_num_threads().max(1);
+        let chunk_size = (addr_count + num_threads - 1) / num_threads;
+
+        let partial_counts: Vec<FxHashMap<u64, u32>> = (0..num_threads).into_par_iter().map(|i| {
+            let start = i * chunk_size;
+            let end = (start + chunk_size).min(addr_count);
+            if start >= end { return FxHashMap::default(); }
+
+            let mut local: FxHashMap<u64, u32> = FxHashMap::default();
+            for (addr, recs) in mem_view.iter_addr_range(start, end) {
+                let read_count = recs.iter().filter(|r| r.is_read()).count() as u32;
+                if read_count > 0 {
+                    local.insert(addr, read_count);
+                }
+            }
+            local
+        }).collect();
+
+        // Merge partial counts (no conflicts since address ranges don't overlap)
+        let read_counts: FxHashMap<u64, u32> = partial_counts.into_iter()
+            .flat_map(|m| m.into_iter())
+            .collect();
+
+        // Parallel computation of per-string xref counts
+        index.strings.par_iter_mut().for_each(|record| {
             let mut count = 0u32;
             for offset in 0..record.byte_len as u64 {
                 count += read_counts.get(&(record.addr + offset)).copied().unwrap_or(0);
             }
             record.xref_count = count;
-        }
+        });
     }
 }
 

@@ -7,7 +7,7 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 
-use trace_core::{TraceEngine, BuildOptions, SearchOptions, SliceOptions, StringQueryOptions, DepTreeOptions, ExportConfig, parse_hex_addr, api_types::TraceLine};
+use trace_core::{TraceEngine, BuildOptions, SearchOptions, SliceOptions, StringQueryOptions, DepTreeOptions, parse_hex_addr, api_types::TraceLine};
 use crate::types::*;
 
 // ── 截断常量 ──
@@ -19,7 +19,7 @@ const MAX_LINES: u32 = 100;
 const MAX_SEARCH: u32 = 200;
 // Referenced in: get_memory_history description ("up to 200 records")
 const MAX_HISTORY: usize = 200;
-// Referenced in: get_dependency_tree, build_dep_tree_from_slice descriptions ("up to 200 nodes")
+// Referenced in: get_dependency_tree description ("up to 200 nodes")
 const MAX_DEP_NODES: u32 = 200;
 const DEFAULT_SEARCH: u32 = 30;
 
@@ -243,26 +243,6 @@ impl TraceToolHandler {
     fn close_trace(&self, Parameters(req): Parameters<CloseTraceRequest>) -> Result<String, String> {
         self.engine.close_session(&req.session_id)
             .map(|()| "Session closed.".to_string())
-            .map_err(|e| e.to_string())
-    }
-
-    #[tool(
-        name = "list_sessions",
-        description = "List all currently open trace sessions with their status."
-    )]
-    fn list_sessions(&self) -> String {
-        json(&self.engine.list_sessions())
-    }
-
-    #[tool(
-        name = "get_session_info",
-        description = "Get detailed status of a trace session, including whether the index is ready, \
-            total line count, and whether taint analysis results exist."
-    )]
-    fn get_session_info(&self, Parameters(req): Parameters<GetSessionInfoRequest>) -> Result<String, String> {
-        let sid = self.resolve_session(req.session_id)?;
-        self.engine.get_session_info(&sid)
-            .map(|info| json(&info))
             .map_err(|e| e.to_string())
     }
 
@@ -766,88 +746,6 @@ impl TraceToolHandler {
             "offset": req.offset,
             "has_more": (req.offset + page.len() as u32) < total,
         })))
-    }
-
-    // ━━━━━━━━━━━━━━━━━━━━━━ 扩展工具 ━━━━━━━━━━━━━━━━━━━━━━
-
-    #[tool(
-        name = "export_taint_results",
-        description = "Export the current taint analysis results to a file. \
-            Requires a prior run_taint_analysis call. \
-            Supports 'json' (structured with metadata) and 'txt' (raw tainted lines) formats."
-    )]
-    async fn export_taint_results(&self, Parameters(req): Parameters<ExportTaintResultsRequest>) -> Result<String, String> {
-        let sid = self.resolve_session(req.session_id)?;
-        let engine = self.engine.clone();
-        blocking(move || {
-            // ExportConfig requires from_specs — retrieve from session's stored slice_origin
-            // For MCP export, we pass empty config since the slice is already computed
-            let config = ExportConfig {
-                from_specs: vec![],
-                start_seq: None,
-                end_seq: None,
-            };
-            engine.export_taint_results(&sid, &req.output_path, &req.format, config)
-                .map(|()| json(&serde_json::json!({
-                    "exported": true,
-                    "path": req.output_path,
-                    "format": req.format,
-                })))
-                .map_err(|e| e.to_string())
-        }).await
-    }
-
-    #[tool(
-        name = "build_dep_tree_from_slice",
-        description = "Build a dependency graph from the current taint analysis results. \
-            Requires a prior run_taint_analysis call. \
-            This is more convenient than get_dependency_tree when you already have taint results, \
-            as it automatically uses the tainted instructions as the starting points."
-    )]
-    async fn build_dep_tree_from_slice(&self, Parameters(req): Parameters<BuildDepTreeFromSliceRequest>) -> Result<String, String> {
-        let sid = self.resolve_session(req.session_id)?;
-        let engine = self.engine.clone();
-        blocking(move || {
-            let max_nodes = req.max_nodes.unwrap_or(MAX_DEP_NODES).min(MAX_DEP_NODES);
-            let options = DepTreeOptions {
-                data_only: req.data_only,
-                max_nodes: Some(max_nodes),
-            };
-            engine.build_dep_tree_from_slice(&sid, options)
-                .map(|graph| json(&graph))
-                .map_err(|e| e.to_string())
-        }).await
-    }
-
-    #[tool(
-        name = "get_line_def_registers",
-        description = "Get the list of registers defined (written) by a specific instruction. \
-            Useful before calling get_def_use_chain to know which registers are available. \
-            Returns register names like ['X0', 'X1']."
-    )]
-    fn get_line_def_registers(&self, Parameters(req): Parameters<GetLineDefRegistersRequest>) -> Result<String, String> {
-        let sid = self.resolve_session(req.session_id)?;
-        self.engine.get_line_def_registers(&sid, req.seq)
-            .map(|regs| json(&regs))
-            .map_err(|e| e.to_string())
-    }
-
-    #[tool(
-        name = "scan_strings",
-        description = "Scan the trace for runtime strings. Only needed if open_trace was called \
-            with skip_strings=true. After this completes, get_strings and get_string_xrefs \
-            will have data. This may take a while for large traces."
-    )]
-    async fn scan_strings(&self, Parameters(req): Parameters<ScanStringsRequest>) -> Result<String, String> {
-        let sid = self.resolve_session(req.session_id)?;
-        let engine = self.engine.clone();
-        blocking(move || {
-            engine.scan_strings(&sid)
-                .map(|()| json(&serde_json::json!({
-                    "status": "String scanning completed.",
-                })))
-                .map_err(|e| e.to_string())
-        }).await
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━ Batch 2: 组合工具 ━━━━━━━━━━━━━━━━━━━━━━

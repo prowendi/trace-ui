@@ -21,12 +21,6 @@ pub struct CloseTraceRequest {
     pub session_id: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct GetSessionInfoRequest {
-    #[schemars(description = "Session ID (optional if only one session is open)")]
-    pub session_id: Option<String>,
-}
-
 // ── 数据查看 ──
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -230,46 +224,6 @@ pub struct GetStringXRefsRequest {
 }
 
 fn default_xref_limit() -> u32 { 30 }
-
-// ── 新增工具请求类型 ──
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ExportTaintResultsRequest {
-    #[schemars(description = "Session ID (optional if only one session is open)")]
-    pub session_id: Option<String>,
-    #[schemars(description = "Output file path to save the results")]
-    pub output_path: String,
-    #[schemars(description = "Export format: 'json' or 'txt' (default: 'json')")]
-    #[serde(default = "default_export_format")]
-    pub format: String,
-}
-
-fn default_export_format() -> String { "json".to_string() }
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct BuildDepTreeFromSliceRequest {
-    #[schemars(description = "Session ID (optional if only one session is open)")]
-    pub session_id: Option<String>,
-    #[schemars(description = "Only data dependencies (no control flow)")]
-    #[serde(default)]
-    pub data_only: bool,
-    #[schemars(description = "Max nodes in the graph (default: 200)")]
-    pub max_nodes: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct GetLineDefRegistersRequest {
-    #[schemars(description = "Session ID (optional if only one session is open)")]
-    pub session_id: Option<String>,
-    #[schemars(description = "Line number (0-based) to query defined registers at")]
-    pub seq: u32,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ScanStringsRequest {
-    #[schemars(description = "Session ID (optional if only one session is open)")]
-    pub session_id: Option<String>,
-}
 
 // ── Batch 2 新增工具请求类型 ──
 
